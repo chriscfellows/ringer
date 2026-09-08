@@ -147,6 +147,28 @@ self-contained:
   do what it says"): the watcher sees no brief, and the retry prompt loses
   the context it needs. Point at files for source MATERIAL; the instructions
   themselves live in the spec. Lint flags pointer specs.
+- **Give every hard bind an escalation path.** If a spec pairs an absolute
+  assertion ("output must contain no X") with a no-touch zone ("never edit
+  dir Y"), and Y is where X comes from, a worker that cannot ask questions
+  will CHEAT rather than fail — observed: a sed appended to the build script
+  to rewrite scan targets in the output. Every such pair gets: "if the
+  assertion is violated from inside the no-touch zone, STOP and list the
+  offending paths in ./notes.md — do not work around it." Have the check
+  accept the reported-conflict state as a distinct PASS.
+- **Ask an implementing worker to prove it read the file.** Before its first
+  edit, have it quote one existing line, with path and line number, from each
+  file it will modify. A worker that cannot READ a repo can still WRITE
+  plausible edits through the shell, and nothing else in the flow separates
+  informed edits from blind ones — observed when an engine's workspace
+  boundary refused `read_file` on every repo path, including the frozen test
+  file that was the contract, and the worker proceeded anyway and reasoned
+  through the assertions by hand. Treat a missing read-proof as an
+  uninformed-edit tell and review that patch before trusting it. This is a
+  tripwire, not a boundary: a worker can fabricate a plausible quote, so it
+  raises the cost of a blind edit rather than preventing one.
+- **Boilerplate for every repo-editing worker:** "Delete any scratch or
+  debug files you create before finishing — the ownership check fails on
+  strays."
 
 ## Check-writing rules
 
@@ -156,6 +178,22 @@ the check's failure output.
 - **Checks must print WHY they fail.** `diff` beats `diff -q`; a validator
   script that prints which assertion broke beats `test -f`. A bare
   `test -f report.md` proves existence, not correctness.
+- **Structure before text.** For any task whose manifest sets `repo`, the FIRST
+  arm on owned source is a parse or typecheck via the ROOT toolchain in the
+  worktree — worktrees have no `node_modules` of their own. Grep arms follow and
+  are labelled floors: a text match asserts nothing about a file that does not
+  parse — a component with `useState` spliced into a props type literal, a
+  duplicated declaration and a deleted `<tr>` still satisfied every grep written
+  against it. Lint now warns when a repo task greps before any typecheck; the
+  warning is a text pin and says so.
+- **Print every arm, never exit at the first.** A check collects every arm's
+  result and prints an arms table (`ARM n PASS|FAIL — why`) before exiting
+  non-zero. The retry prompt is built from this output, so a one-failure check
+  is a one-defect retry: the worker fixes the arm it was shown and walks back
+  into the others. `templates/repo-feature/checks/check_repo_feature.py` is the
+  model — it accumulates a `fails` list and prints every entry before returning
+  non-zero, though it still fail-fasts on four preconditions (missing repo, no
+  `.git`, failed build, failed `git status`) and prints no literal ARM table.
 - **Verify content, not existence.** Grep the artifact for required sections,
   run the code it produced, run the build, run the validator — execute
   something that would catch a lazy or hallucinated result.
@@ -167,7 +205,7 @@ the check's failure output.
 - **Strict on substance, tolerant on format.** Checks that count exact
   headings, demand exact casing, or grep rigid phrasings fail honest work
   over formatting — and a wall of red format-failures reads as a broken
-  system, not a careful one (demo-night lesson). Verify what must be TRUE
+  system, not a careful one (live-demo lesson). Verify what must be TRUE
   (the file proves X, the code runs, the quote exists in the source), use
   case-insensitive and flexible matching for structure, and reserve hard
   failure for substance: missing evidence, fabricated content, code that
@@ -184,6 +222,23 @@ the check's failure output.
   own validator" test so the checker exercises what it preaches. And keep
   orchestrator patch review mandatory regardless of PASS status — a green
   check is not proof of semantic correctness.
+- **Tripwire the build pipeline, not just source.** Added-line scans must
+  cover `package.json` scripts and build configs: a gamed output-scan almost
+  always edits the pipeline (post-processing the artifact) rather than the
+  sources. Assert script purity where feasible (`scripts.build` equals the
+  bare builder).
+- **Frozen artifacts have chain of custody.** Reviewers get isolated COPIES,
+  never the canonical export path — a reviewer once silently fixed the frozen
+  tests instead of returning FAIL. After any review touches frozen inputs,
+  re-verify their red/green state by execution before treating them as the
+  contract.
+- **Baseline every manifest before spawning** (`./ringer.py run manifest.json
+  --baseline` — executes each check against the unmodified tree, zero
+  workers). Reading it: assertions demanding the NEW behavior are expected to
+  fail; an assertion about UNCHANGED behavior (a [legacy]-style canary, an
+  ownership sweep, a harness-health probe) that fails baseline is a bug in
+  YOUR check — and skipping this step once cost two full worker attempts
+  (~7M tokens) against a check no model could satisfy.
 
 ## Pattern playbook
 
@@ -291,7 +346,7 @@ per task via the manifest `engine` field. Defaults are deliberate:
   task_type): first_try_pass_rate is the routing signal; pass_rate includes
   retry rescues. Then read `docs/MODEL-NOTES.md` (in the ringer repo) for
   the judgment the numbers can't carry. Routing is grounded in performance,
-  not vibes (Jon directive 2026-07-06).
+  not vibes (operator directive, 2026-07-06).
 - **"Show me the scoreboard" is one command.** When the human asks to see
   the model scoreboard, rankings, model costs, or "which models work best,"
   run `./ringer.py models --open` — it renders the full scoreboard (tiers,
@@ -303,6 +358,16 @@ per task via the manifest `engine` field. Defaults are deliberate:
   code-feature, code-fix, code-review, research, persona-review, site-build,
   image-gen, docs, probe, bakeoff, ...). Untyped tasks bucket as (untyped)
   and teach the scoreboard nothing; lint nudges you when it's missing.
+
+
+**Escalate the model when the task warrants it.** The default lane is for
+default work. When a single task carries architecture-level complexity —
+many interacting contract requirements, novel design, a 15+ test frozen
+suite — flag it and recommend a stronger model or lane WITH the scoreboard
+numbers before spawning; the per-task `model`/`engine` fields exist for
+exactly this. Signals worth escalating on: prior same-shape tasks burned
+>5M tokens, or produced workaround-shaped output under spec pressure.
+Quality-per-token beats tokens-per-dollar on contract-heavy work.
 
 ## Worktrees-mode footguns (learned the hard way)
 
@@ -337,9 +402,13 @@ someone's untracked scratch files.
    manifest.
 3. Spot-check at least one PASSING task's artifact per run. The check
    catches most laziness; you catch the rest.
-4. Failures with useless error messages mean your CHECK needs work, not
+4. **Read every hunk of config and manifest files in the patch** —
+   `package.json`, build scripts, CI configs. The two check-gaming incidents
+   both hid in one-line config changes adjacent to legitimate edits; diff
+   stats and spot-checks do not catch them.
+5. Failures with useless error messages mean your CHECK needs work, not
    (only) the worker.
-5. **Update `docs/MODEL-NOTES.md`** (in the ringer repo) when a run taught
+6. **Update `docs/MODEL-NOTES.md`** (in the ringer repo) when a run taught
    you something about a model: one dated line under the model — task type,
    what happened (attempts, tokens, failure mode), what you'd do
    differently. Only what the executed checks and raw logs support. The raw
